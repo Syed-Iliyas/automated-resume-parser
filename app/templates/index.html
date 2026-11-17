@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resume Parser</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header>
+        <h1>Automated Resume Parser</h1>
+        <p>Upload resumes (PDF / DOCX) to extract and search candidate details.</p>
+    </header>
+
+    <main>
+        <section class="card">
+            <h2>Upload Resumes</h2>
+            <form id="upload-form">
+                <input type="file" id="files" name="files" multiple accept=".pdf,.doc,.docx">
+                <button type="submit">Parse &amp; Store</button>
+            </form>
+            <div id="upload-status" class="status"></div>
+        </section>
+
+        <section class="card">
+            <div class="toolbar">
+                <h2>Candidates <span id="count" class="muted"></span></h2>
+                <div class="filters">
+                    <input type="text" id="search" placeholder="Search name, skill, text...">
+                    <select id="skill-filter"><option value="">All skills</option></select>
+                    <button id="search-btn" type="button">Search</button>
+                </div>
+            </div>
+            <div id="results" class="results"></div>
+        </section>
+    </main>
+
+    <dialog id="detail-dialog">
+        <button id="close-dialog" aria-label="Close">&times;</button>
+        <div id="detail-content"></div>
+    </dialog>
+
+    <script>
+        const resultsEl = document.getElementById('results');
+        const statusEl = document.getElementById('upload-status');
+        const searchEl = document.getElementById('search');
+        const skillEl = document.getElementById('skill-filter');
+        const dialog = document.getElementById('detail-dialog');
+
+        function esc(value) {
+            if (value == null) return '';
+            const div = document.createElement('div');
+            div.textContent = String(value);
+            return div.innerHTML;
+        }
+
+        async function loadSkills() {
+            const res = await fetch('/api/skills');
+            const data = await res.json();
+            data.skills.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.name;
+                opt.textContent = s.name;
+                skillEl.appendChild(opt);
+            });
+        }
+
+        async function loadCandidates() {
+            const params = new URLSearchParams({
+                q: searchEl.value.trim(),
+                skill: skillEl.value,
+                per_page: 50
+            });
+            const res = await fetch('/api/candidates?' + params);
+            const data = await res.json();
+            document.getElementById('count').textContent = `(${data.total})`;
+
+            if (!data.candidates.length) {
+                resultsEl.innerHTML = '<p class="muted">No candidates found.</p>';
+                return;
+            }
+
+            resultsEl.innerHTML = data.candidates.map(c => `
+                <article class="candidate" data-id="${c.id}">
+                    <div class="candidate-main">
+                        <h3>${esc(c.name)}</h3>
+                        <p class="muted">${esc(c.email || 'No email')} ${c.phone ? '· ' + esc(c.phone) : ''}
+                            ${c.location ? '· ' + esc(c.location) : ''}</p>
+                        <div class="tags">
+                            ${c.skills.map(s => `<span class="tag">${esc(s)}</span>`).join('')}
+                        </div>
+                    </div>
+                    <div class="candidate-meta">
+                        ${c.years_experience ? `<span>${esc(c.years_experience)} yrs exp</span>` : ''}
+                        <button class="view-btn" data-id="${c.id}">View</button>
+                        <button class="delete-btn" data-id="${c.id}">Delete</button>
+                    </div>
+                </article>
+            `).join('');
+
+            resultsEl.querySelectorAll('.view-btn').forEach(btn =>
+                btn.addEventListener('click', () => showDetail(btn.dataset.id)));
+            resultsEl.querySelectorAll('.delete-btn').forEach(btn =>
+                btn.addEventListener('click', () => deleteCandidate(btn.dataset.id)));
+        }
+
+        async function showDetail(id) {
+            const res = await fetch('/api/candidates/' + id);
+            const c = await res.json();
+            document.getElementById('detail-content').innerHTML = `
+                <h2>${esc(c.name)}</h2>
+                <p><strong>Email:</strong> ${esc(c.email || '—')} &nbsp;
+                   <strong>Phone:</strong> ${esc(c.phone || '—')} &nbsp;
+                   <strong>Location:</strong> ${esc(c.location || '—')}</p>
+                <p><strong>Experience:</strong> ${c.years_experience ? esc(c.years_experience) + ' years' : '—'}</p>
+                <h3>Skills</h3>
+                <div class="tags">${c.skills.map(s => `<span class="tag">${esc(s)}</span>`).join('') || '—'}</div>
+                <h3>Education</h3>
+                ${c.education.length ? c.education.map(e => `
+                    <p>${esc(e.degree)} ${e.field_of_study ? 'in ' + esc(e.field_of_study) : ''}
+                    ${e.institution ? '— ' + esc(e.institution) : ''} ${e.year ? '(' + esc(e.year) + ')' : ''}</p>
+                `).join('') : '<p class="muted">—</p>'}
+                ${c.summary ? `<h3>Summary</h3><p>${esc(c.summary)}</p>` : ''}
+            `;
+            dialog.showModal();
+        }
+
+        async function deleteCandidate(id) {
+            if (!confirm('Delete this candidate?')) return;
+            await fetch('/api/candidates/' + id, { method: 'DELETE' });
+            loadCandidates();
+        }
+
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const files = document.getElementById('files').files;
+            if (!files.length) { statusEl.textContent = 'Choose at least one file.'; return; }
+
+            const form = new FormData();
+            [...files].forEach(f => form.append('files', f));
+            statusEl.textContent = 'Parsing...';
+
+            const res = await fetch('/api/resumes/upload', { method: 'POST', body: form });
+            const data = await res.json();
+            const ok = data.created ? data.created.length : 0;
+            const bad = data.errors ? data.errors.length : 0;
+            statusEl.textContent = `${ok} parsed, ${bad} failed.`;
+            if (data.errors && data.errors.length) {
+                statusEl.textContent += ' ' + data.errors.map(x => x.file + ': ' + x.error).join('; ');
+            }
+            document.getElementById('files').value = '';
+            loadSkills();
+            loadCandidates();
+        });
+
+        document.getElementById('search-btn').addEventListener('click', loadCandidates);
+        skillEl.addEventListener('change', loadCandidates);
+        searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') loadCandidates(); });
+        document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+
+        loadSkills();
+        loadCandidates();
+    </script>
+</body>
+</html>
